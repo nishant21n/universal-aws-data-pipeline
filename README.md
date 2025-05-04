@@ -166,6 +166,3 @@ source:
 - VPC endpoints for secure service communication
 - Secrets management for sensitive information
 
-## License
-
-MIT License 
