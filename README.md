@@ -19,7 +19,6 @@ A production-ready, source-agnostic data pipeline built on AWS services for inge
 
 ## Architecture
 
-![Architecture Diagram](docs/architecture_diagram.png)
 
 The pipeline consists of the following layers:
 
