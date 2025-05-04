@@ -1,0 +1,251 @@
+{
+  "Comment": "Data Pipeline Workflow",
+  "StartAt": "InitializeExecution",
+  "States": {
+    "InitializeExecution": {
+      "Type": "Pass",
+      "Parameters": {
+        "execution_id.$": "$$.Execution.Id",
+        "execution_start_time.$": "$$.Execution.StartTime",
+        "source_name.$": "$.source_name",
+        "pipeline_type.$": "$.pipeline_type"
+      },
+      "Next": "DetermineSourceType"
+    },
+    "DetermineSourceType": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.pipeline_type",
+          "StringEquals": "api",
+          "Next": "APIIngestion"
+        },
+        {
+          "Variable": "$.pipeline_type",
+          "StringEquals": "email",
+          "Next": "EmailProcessingComplete"
+        },
+        {
+          "Variable": "$.pipeline_type",
+          "StringEquals": "file",
+          "Next": "FileProcessingComplete"
+        },
+        {
+          "Variable": "$.pipeline_type",
+          "StringEquals": "stream",
+          "Next": "StreamProcessingComplete"
+        }
+      ],
+      "Default": "InvalidSourceType"
+    },
+    "InvalidSourceType": {
+      "Type": "Fail",
+      "Error": "InvalidSourceType",
+      "Cause": "The specified pipeline_type is not supported"
+    },
+    "APIIngestion": {
+      "Type": "Task",
+      "Resource": "${APIIngestionLambdaArn}",
+      "ResultPath": "$.ingestion_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendIngestionFailureNotification"
+        }
+      ],
+      "Next": "StartGlueCrawler"
+    },
+    "EmailProcessingComplete": {
+      "Type": "Pass",
+      "Comment": "Email is processed by SES/Lambda directly when received",
+      "Next": "StartGlueCrawler"
+    },
+    "FileProcessingComplete": {
+      "Type": "Pass",
+      "Comment": "File is processed by S3/Lambda directly when uploaded",
+      "Next": "StartGlueCrawler"
+    },
+    "StreamProcessingComplete": {
+      "Type": "Pass",
+      "Comment": "Stream is processed by Kinesis/Lambda directly when data arrives",
+      "Next": "StartGlueCrawler"
+    },
+    "SendIngestionFailureNotification": {
+      "Type": "Task",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "message": "Data ingestion failed",
+        "subject": "Pipeline Error: Ingestion Failed",
+        "source_name.$": "$.source_name",
+        "execution_id.$": "$.execution_id",
+        "error.$": "$.error"
+      },
+      "End": true
+    },
+    "StartGlueCrawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name.$": "States.Format('{}Crawler', $.source_name)"
+      },
+      "ResultPath": "$.crawler_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendCrawlerFailureNotification"
+        }
+      ],
+      "Next": "WaitForCrawler"
+    },
+    "WaitForCrawler": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "CheckCrawlerStatus"
+    },
+    "CheckCrawlerStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": {
+        "Name.$": "States.Format('{}Crawler', $.source_name)"
+      },
+      "ResultPath": "$.crawler_status",
+      "Next": "IsCrawlerComplete"
+    },
+    "IsCrawlerComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.crawler_status.Crawler.State",
+          "StringEquals": "READY",
+          "Next": "StartGlueJob"
+        }
+      ],
+      "Default": "WaitForCrawler"
+    },
+    "SendCrawlerFailureNotification": {
+      "Type": "Task",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "message": "Glue crawler failed",
+        "subject": "Pipeline Error: Crawler Failed",
+        "source_name.$": "$.source_name",
+        "execution_id.$": "$.execution_id",
+        "error.$": "$.error"
+      },
+      "End": true
+    },
+    "StartGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${TransformationGlueJobName}",
+        "Arguments": {
+          "--source_name.$": "$.source_name",
+          "--input_path.$": "States.Format('s3://${RawBucket}/{}/raw/', $.source_name)",
+          "--output_path.$": "States.Format('s3://${ProcessedBucket}/{}/processed/', $.source_name)",
+          "--config_param_path": "${ConfigParamPath}",
+          "--data_format": "json"
+        }
+      },
+      "ResultPath": "$.glue_job_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 180,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendGlueJobFailureNotification"
+        }
+      ],
+      "Next": "LoadToRedshift"
+    },
+    "SendGlueJobFailureNotification": {
+      "Type": "Task",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "message": "Glue transformation job failed",
+        "subject": "Pipeline Error: Transformation Failed",
+        "source_name.$": "$.source_name",
+        "execution_id.$": "$.execution_id",
+        "error.$": "$.error"
+      },
+      "End": true
+    },
+    "LoadToRedshift": {
+      "Type": "Task",
+      "Resource": "${RedshiftLoaderLambdaArn}",
+      "Parameters": {
+        "source_name.$": "$.source_name",
+        "s3_path.$": "States.Format('s3://${ProcessedBucket}/{}/processed/', $.source_name)",
+        "execution_id.$": "$.execution_id"
+      },
+      "ResultPath": "$.redshift_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "SendRedshiftFailureNotification"
+        }
+      ],
+      "Next": "SendSuccessNotification"
+    },
+    "SendRedshiftFailureNotification": {
+      "Type": "Task",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "message": "Redshift loading failed",
+        "subject": "Pipeline Error: Redshift Load Failed",
+        "source_name.$": "$.source_name",
+        "execution_id.$": "$.execution_id",
+        "error.$": "$.error"
+      },
+      "End": true
+    },
+    "SendSuccessNotification": {
+      "Type": "Task",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "message.$": "States.Format('Data pipeline completed successfully for source: {}', $.source_name)",
+        "subject.$": "States.Format('Pipeline Success: {} Processed', $.source_name)",
+        "source_name.$": "$.source_name",
+        "execution_id.$": "$.execution_id",
+        "ingestion_result.$": "$.ingestion_result",
+        "glue_job_result.$": "$.glue_job_result",
+        "redshift_result.$": "$.redshift_result"
+      },
+      "End": true
+    }
+  }
+} 

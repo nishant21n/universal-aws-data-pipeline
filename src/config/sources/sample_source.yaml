@@ -1,0 +1,113 @@
+# Sample Data Source Configuration
+# This configuration file defines a REST API data source
+
+source:
+  # Basic source information
+  name: customer_data_api
+  type: rest_api
+  description: "Customer data from external API"
+  owner: "data-team@example.com"
+  
+  # Source specific configuration
+  config:
+    endpoint: "https://api.example.com/customers"
+    method: GET
+    headers:
+      Authorization: "${SECRET:customer_api_key}"
+      Content-Type: "application/json"
+    parameters:
+      limit: 1000
+      offset: 0
+    pagination:
+      enabled: true
+      limit_param: "limit"
+      offset_param: "offset"
+      max_pages: 10
+    schedule: "rate(1 hour)"
+    timeout: 30 # seconds
+    retry:
+      attempts: 3
+      backoff: exponential
+  
+  # Schema definition
+  schema:
+    type: json
+    mapping:
+      customerId: id
+      customerName: name
+      customerEmail: email
+      customerAddress:
+        street: address.street
+        city: address.city
+        state: address.state
+        zip: address.zipcode
+      createdDate: created_at
+      lastUpdated: updated_at
+    required:
+      - customerId
+      - customerName
+      - customerEmail
+    transformations:
+      - field: createdDate
+        type: datetime
+        format: "YYYY-MM-DD HH:mm:ss"
+      - field: lastUpdated
+        type: datetime
+        format: "YYYY-MM-DD HH:mm:ss"
+  
+  # Storage configuration
+  destination:
+    raw:
+      bucket: "${BUCKET:raw}"
+      prefix: "customers/raw/"
+      format: json
+    processed:
+      bucket: "${BUCKET:processed}"
+      prefix: "customers/processed/"
+      format: parquet
+      partitionBy:
+        - year
+        - month
+        - day
+  
+  # Redshift configuration
+  redshift:
+    schema: customers
+    table: customer_data
+    distkey: customerId
+    sortkey: 
+      - customerName
+      - lastUpdated
+    vacuum_strategy: auto  # Options: auto, full, delete
+    analyze: true
+  
+  # Data quality checks
+  quality_checks:
+    - type: not_null
+      columns: 
+        - customerId
+        - customerEmail
+    - type: unique
+      columns:
+        - customerId
+    - type: regex
+      column: customerEmail
+      pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+  
+  # Monitoring and alerting
+  monitoring:
+    metrics:
+      - name: record_count
+        threshold: 10
+        comparison: GreaterThan
+        evaluation_periods: 1
+      - name: error_count
+        threshold: 0
+        comparison: GreaterThan
+        evaluation_periods: 1
+    notifications:
+      - type: email
+        recipients:
+          - "alerts@example.com"
+      - type: slack
+        channel: "#data-alerts" 
